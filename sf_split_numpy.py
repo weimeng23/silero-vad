@@ -53,7 +53,7 @@ def main():
     parser.add_argument("--min_speech_ms", type=int, default=250, help="Minimum speech duration in ms")
     parser.add_argument("--min_silence_ms", type=int, default=2000, help="Minimum silence duration in ms")
     parser.add_argument("--max_speech_s", type=float, default=60, help="Maximum speech duration in seconds")
-    parser.add_argument("--min_silence_at_max_speech", type=float, default=100, help="Minimum silence (ms) used when max_speech_s is reached")
+    parser.add_argument("--min_silence_at_max_speech", type=float, default=200, help="Minimum silence (ms) used when max_speech_s is reached")
     parser.add_argument("--pad_ms", type=int, default=30, help="Padding around each speech segment in ms")
     parser.add_argument("--visualize", action="store_true", help="Visualize probability curve")
     args = parser.parse_args()
