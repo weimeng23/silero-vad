@@ -10,11 +10,11 @@ def load_silero_vad(onnx=False, opset_version=16):
 
     if onnx:
         if opset_version == 16:
-            model_name = 'silero_vad.onnx'
+            model_name = 'silero_vad_v6.onnx'
         else:
-            model_name = f'silero_vad_16k_op{opset_version}.onnx'
+            model_name = f'silero_vad_v6_16k_op{opset_version}.onnx'
     else:
-        model_name = 'silero_vad.jit'
+        model_name = 'silero_vad_v6.jit'
     package_path = "silero_vad.data"
 
     try:

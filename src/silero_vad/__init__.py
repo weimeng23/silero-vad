@@ -4,10 +4,11 @@ try:
 except:
     pass
 
-from silero_vad.model import load_silero_vad
-from silero_vad.utils_vad import (get_speech_timestamps,
+from .model import load_silero_vad
+from .utils_vad import (get_speech_timestamps,
                                   save_audio,
                                   read_audio,
                                   VADIterator,
                                   collect_chunks,
                                   drop_chunks)
+from .utils_vad_ext import get_speech_timestamps_np, NumpyOnnxWrapper

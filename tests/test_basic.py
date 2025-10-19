@@ -1,6 +1,9 @@
-from silero_vad import load_silero_vad, read_audio, get_speech_timestamps
 import torch
+import sys
+from pathlib import Path
 torch.set_num_threads(1)
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+from silero_vad import load_silero_vad, read_audio, get_speech_timestamps
 
 def test_jit_model():
     model = load_silero_vad(onnx=False)

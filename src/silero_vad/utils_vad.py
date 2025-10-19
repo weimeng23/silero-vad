@@ -1,5 +1,6 @@
 import torch
 import torchaudio
+import numpy as np
 from typing import Callable, List
 import warnings
 
@@ -9,8 +10,6 @@ languages = ['ru', 'en', 'de', 'es']
 class OnnxWrapper():
 
     def __init__(self, path, force_onnx_cpu=False):
-        import numpy as np
-        global np
         import onnxruntime
 
         opts = onnxruntime.SessionOptions()
@@ -308,7 +307,7 @@ def get_speech_timestamps(audio: torch.Tensor,
         try:
             speech_prob = model(chunk, sampling_rate).item()
         except Exception as e:
-            import ipdb; ipdb.set_trace()
+            raise
         speech_probs.append(speech_prob)
         # caculate progress and seng it to callback function
         progress = current_start_sample + hop_size_samples
@@ -419,6 +418,10 @@ def get_speech_timestamps(audio: torch.Tensor,
         make_visualization(speech_probs, hop_size_samples / sampling_rate)
 
     return speeches
+
+
+def get_speech_timestamps_np(*args, **kwargs):
+    raise NotImplementedError('get_speech_timestamps_np has been moved to silero_vad.utils_vad_ext')
 
 
 class VADIterator:
