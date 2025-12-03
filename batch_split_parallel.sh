@@ -37,7 +37,7 @@ mkdir -p "$OUTPUT_DIR"
 
 # 获取脚本所在目录，用于定位 Python 脚本
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON_SCRIPT="$(dirname "$SCRIPT_DIR")/sf_split_numpy.py"
+PYTHON_SCRIPT="$SCRIPT_DIR/sf_split_numpy.py"
 
 # 检查 Python 脚本是否存在
 if [ ! -f "$PYTHON_SCRIPT" ]; then
@@ -54,15 +54,15 @@ trap "rm -f $TEMP_LOG $PROGRESS_FILE" EXIT
 process_audio() {
     local input_file="$1"
     shift
-    
+
     # 提取文件名(不含扩展名)作为音频ID
     local filename=$(basename "$input_file")
     local audio_id="${filename%.*}"
-    
+
     # 创建该音频ID的输出目录
     local out_dir="${OUTPUT_DIR}/${audio_id}"
     mkdir -p "$out_dir"
-    
+
     # 执行 VAD 拆分 - 剩余参数 $@ 作为 VAD 参数
     local start_time=$(date +%s)
     if python3 "$PYTHON_SCRIPT" "$input_file" --out_dir "$out_dir" "$@" > /dev/null 2>&1; then
@@ -112,12 +112,12 @@ monitor_progress() {
     local total=$1
     local progress_file=$2
     local last_count=0
-    
+
     while true; do
         if [ -f "$progress_file" ]; then
             local current=$(wc -l < "$progress_file" 2>/dev/null | tr -d ' ')
             current=${current:-0}
-            
+
             if [ "$current" != "$last_count" ]; then
                 local percent=$((current * 100 / total))
                 local success=$(grep -c "^SUCCESS" "$TEMP_LOG" 2>/dev/null || echo 0)
@@ -126,13 +126,13 @@ monitor_progress() {
                 local failed=$(grep -c "^FAILED" "$TEMP_LOG" 2>/dev/null || echo 0)
                 failed=$(echo "$failed" | tr -d ' \n')
                 failed=${failed:-0}
-                
+
                 # 使用 \r 实现同行刷新，清除整行避免残留字符
                 printf "\r\033[K进度: %d/%d (%d%%) | 成功: %d | 失败: %d " \
                     "$current" "$total" "$percent" "$success" "$failed"
-                
+
                 last_count=$current
-                
+
                 # 处理完成
                 if [ "$current" -ge "$total" ]; then
                     printf "\n"

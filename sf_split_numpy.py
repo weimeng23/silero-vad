@@ -21,7 +21,7 @@ from silero_vad import NumpyOnnxWrapper, get_speech_timestamps_np  # noqa: E402
 
 def _locate_onnx_path() -> str:
     base = os.path.abspath(os.path.join(os.path.dirname(__file__), "src", "silero_vad", "data"))
-    for name in ["silero_vad_v6.onnx", "silero_vad_v6_16k_op15.onnx"]:
+    for name in ["silero_vad_v6_16k_op15.onnx", "silero_vad_v6.onnx"]:
         p = os.path.join(base, name)
         if os.path.exists(p):
             return p
