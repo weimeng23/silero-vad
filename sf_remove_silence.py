@@ -2,9 +2,9 @@ import os
 import sys
 import argparse
 import multiprocessing as mp
+import time
 from pathlib import Path
-from typing import List, Optional
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import List
 
 import numpy as np
 import soundfile as sf
@@ -21,8 +21,16 @@ _add_src_to_path()
 
 from silero_vad import NumpyOnnxWrapper, get_speech_timestamps_np  # noqa: E402
 
-# 进程内缓存模型
-_process_model = None
+# 子进程共享变量（通过 initializer 传入）
+_shared_counter = None
+_shared_lock = None
+
+
+def _init_worker(counter, lock):
+    """子进程初始化：接收共享对象"""
+    global _shared_counter, _shared_lock
+    _shared_counter = counter
+    _shared_lock = lock
 
 
 def _locate_onnx_path() -> str:
@@ -32,15 +40,6 @@ def _locate_onnx_path() -> str:
         if os.path.exists(p):
             return p
     raise FileNotFoundError(f"No ONNX model found in {base}")
-
-
-def _get_model():
-    """每个进程懒加载一次模型"""
-    global _process_model
-    if _process_model is None:
-        model_path = _locate_onnx_path()
-        _process_model = NumpyOnnxWrapper(model_path, force_onnx_cpu=True)
-    return _process_model
 
 
 def _ensure_mono_float32(audio: np.ndarray) -> np.ndarray:
@@ -63,48 +62,57 @@ def concat_speech_segments(audio: np.ndarray, tss: List[dict]) -> np.ndarray:
     return np.concatenate(segments)
 
 
-def _worker_process_file(task: dict) -> tuple:
-    """子进程处理函数，返回 (filename, success)"""
-    filepath = task['filepath']
-    filename = os.path.basename(filepath)
-    
-    try:
-        model = _get_model()
-        
-        if task['overwrite']:
-            out_path = filepath
-        else:
-            base, _ = os.path.splitext(filepath)
-            out_path = f"{base}_no_silence.wav"
+def _worker_batch(args_tuple) -> List[str]:
+    """子进程：处理一批文件，返回成功的文件名列表"""
+    file_list, params = args_tuple
+    global _shared_counter, _shared_lock
 
-        audio, sr = sf.read(filepath, dtype="float32")
-        audio = _ensure_mono_float32(audio)
-        _validate_sr(sr)
+    model = NumpyOnnxWrapper(_locate_onnx_path(), force_onnx_cpu=True)
+    success_files = []
 
-        tss = get_speech_timestamps_np(
-            audio,
-            model,
-            threshold=task['threshold'],
-            sampling_rate=sr,
-            min_speech_duration_ms=task['min_speech_ms'],
-            max_speech_duration_s=task['max_speech_s'],
-            min_silence_duration_ms=task['min_silence_ms'],
-            min_silence_at_max_speech=task['min_silence_at_max_speech'],
-            speech_pad_ms=task['pad_ms'],
-            return_seconds=False,
-        )
+    for filepath in file_list:
+        try:
+            if params['overwrite']:
+                out_path = filepath
+            else:
+                base, _ = os.path.splitext(filepath)
+                out_path = f"{base}_no_silence.wav"
 
-        if tss:
-            concatenated = concat_speech_segments(audio, tss)
-            sf.write(out_path, concatenated, sr, subtype="PCM_16")
-        
-        return (filename, True)
-    except Exception:
-        return (filename, False)
+            audio, sr = sf.read(filepath, dtype="float32")
+            audio = _ensure_mono_float32(audio)
+            _validate_sr(sr)
+
+            tss = get_speech_timestamps_np(
+                audio,
+                model,
+                threshold=params['threshold'],
+                sampling_rate=sr,
+                min_speech_duration_ms=params['min_speech_ms'],
+                max_speech_duration_s=params['max_speech_s'],
+                min_silence_duration_ms=params['min_silence_ms'],
+                min_silence_at_max_speech=params['min_silence_at_max_speech'],
+                speech_pad_ms=params['pad_ms'],
+                return_seconds=False,
+            )
+
+            if tss:
+                concatenated = concat_speech_segments(audio, tss)
+                sf.write(out_path, concatenated, sr, subtype="PCM_16")
+
+            success_files.append(os.path.basename(filepath))
+        except Exception:
+            pass
+
+        # 更新进度计数
+        with _shared_lock:
+            _shared_counter.value += 1
+
+    return success_files
 
 
 def get_audio_files(directory: str, recursive: bool = False) -> List[str]:
-    extensions = {'.wav', '.mp3', '.flac', '.m4a', '.ogg', '.opus'}
+    # extensions = {'.wav', '.mp3', '.flac', '.m4a', '.ogg', '.opus'}
+    extensions = {'.wav'}
     files = []
     if recursive:
         for root, _, filenames in os.walk(directory):
@@ -125,11 +133,17 @@ def load_processed_log(log_path: str) -> set:
         return set(line.strip() for line in f if line.strip())
 
 
+def split_list(lst: list, n: int) -> List[list]:
+    """将列表均匀分成 n 份"""
+    k, m = divmod(len(lst), n)
+    return [lst[i * k + min(i, m):(i + 1) * k + min(i + 1, m)] for i in range(n)]
+
+
 def process_directory(args):
-    """多进程处理目录"""
+    """多进程处理目录（预分片模式）"""
     input_dir = args.input
     audio_files = get_audio_files(input_dir, recursive=args.recursive)
-    
+
     if not audio_files:
         print("没有找到音频文件")
         return
@@ -137,23 +151,22 @@ def process_directory(args):
     script_dir = os.path.dirname(os.path.abspath(__file__))
     dir_name = os.path.basename(os.path.realpath(input_dir))
     log_path = os.path.join(script_dir, f"{dir_name}.processed.log")
-    
+
     processed = load_processed_log(log_path)
     pending_files = [f for f in audio_files if os.path.basename(f) not in processed]
-    
+
     total = len(audio_files)
     done_count = len(processed)
     pending_count = len(pending_files)
-    
-    print(f"总文件数: {total} | 已处理: {done_count} | 待处理: {pending_count} | 进程数: {args.workers}")
-    
+    num_workers = min(args.workers, pending_count) if pending_count > 0 else 1
+
+    print(f"总文件数: {total} | 已处理: {done_count} | 待处理: {pending_count} | 进程数: {num_workers}", flush=True)
+
     if pending_count == 0:
         print("所有文件已处理完成")
         return
 
-    # 构建任务列表
-    tasks = [{
-        'filepath': f,
+    params = {
         'overwrite': args.overwrite,
         'threshold': args.threshold,
         'min_speech_ms': args.min_speech_ms,
@@ -161,27 +174,44 @@ def process_directory(args):
         'max_speech_s': args.max_speech_s,
         'min_silence_at_max_speech': args.min_silence_at_max_speech,
         'pad_ms': args.pad_ms,
-    } for f in pending_files]
+    }
 
-    completed = 0
-    success = 0
+    # 分片
+    chunks = split_list(pending_files, num_workers)
+
+    # 共享计数器（通过 initializer 传给子进程）
+    counter = mp.Value('i', 0)
+    lock = mp.Lock()
+
+    # 启动进程池，用 initializer 传递共享对象
+    pool = mp.Pool(num_workers, initializer=_init_worker, initargs=(counter, lock))
     
-    # 主进程统一写日志，避免并发问题
-    with open(log_path, 'a') as log_file:
-        with ProcessPoolExecutor(max_workers=args.workers) as executor:
-            futures = {executor.submit(_worker_process_file, t): t for t in tasks}
-            
-            for future in as_completed(futures):
-                filename, ok = future.result()
-                completed += 1
-                if ok:
-                    success += 1
-                    log_file.write(filename + '\n')
-                    log_file.flush()
-                
-                print(f"\r进度: {completed}/{pending_count} (成功: {success})", end="", flush=True)
+    # 提交任务
+    async_results = [pool.apply_async(_worker_batch, ((chunk, params),)) for chunk in chunks]
+    pool.close()
 
-    print(f"\n完成! 成功: {success}/{pending_count}")
+    # 主进程轮询进度
+    while True:
+        with lock:
+            current = counter.value
+        print(f"\r进度: {current}/{pending_count}", end="", flush=True)
+        if current >= pending_count:
+            break
+        time.sleep(1.0)
+
+    pool.join()
+    print()
+
+    # 收集结果并写日志
+    all_success = []
+    for r in async_results:
+        all_success.extend(r.get())
+
+    with open(log_path, 'a') as f:
+        for name in all_success:
+            f.write(name + '\n')
+
+    print(f"完成! 成功: {len(all_success)}/{pending_count}")
 
 
 def process_single(args):
