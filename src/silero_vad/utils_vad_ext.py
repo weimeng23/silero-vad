@@ -9,8 +9,8 @@ class NumpyOnnxWrapper:
 
         opts = onnxruntime.SessionOptions()
         opts.inter_op_num_threads = 1
-        opts.intra_op_num_threads = 4
-        warnings.warn('intra_op_num_threads is set to 4')
+        opts.intra_op_num_threads = 2
+        warnings.warn('intra_op_num_threads is set to 2')
         warnings.warn('inter_op_num_threads is set to 1')
 
         if force_onnx_cpu and 'CPUExecutionProvider' in onnxruntime.get_available_providers():
