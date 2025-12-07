@@ -62,15 +62,17 @@ def concat_speech_segments(audio: np.ndarray, tss: List[dict]) -> np.ndarray:
     return np.concatenate(segments)
 
 
-def _worker_batch(args_tuple) -> List[str]:
-    """子进程：处理一批文件，返回成功的文件名列表"""
+def _worker_batch(args_tuple) -> tuple:
+    """子进程：处理一批文件，返回 (成功文件名列表, 失败文件及原因列表)"""
     file_list, params = args_tuple
     global _shared_counter, _shared_lock
 
     model = NumpyOnnxWrapper(_locate_onnx_path(), force_onnx_cpu=True)
     success_files = []
+    failed_files = []  # [(filename, error_msg), ...]
 
     for filepath in file_list:
+        filename = os.path.basename(filepath)
         try:
             if params['overwrite']:
                 out_path = filepath
@@ -97,17 +99,19 @@ def _worker_batch(args_tuple) -> List[str]:
 
             if tss:
                 concatenated = concat_speech_segments(audio, tss)
-                sf.write(out_path, concatenated, sr, subtype="PCM_16")
+            else:
+                concatenated = np.array([], dtype=np.float32)
 
-            success_files.append(os.path.basename(filepath))
-        except Exception:
-            pass
+            sf.write(out_path, concatenated, sr, subtype="PCM_16")
+            success_files.append(filename)
+        except Exception as e:
+            failed_files.append((filename, str(e)[:100]))  # 截断错误信息
 
         # 更新进度计数
         with _shared_lock:
             _shared_counter.value += 1
 
-    return success_files
+    return success_files, failed_files
 
 
 def get_audio_files(directory: str, recursive: bool = False) -> List[str]:
@@ -202,16 +206,28 @@ def process_directory(args):
     pool.join()
     print()
 
-    # 收集结果并写日志
+    # 收集结果
     all_success = []
+    all_failed = []
     for r in async_results:
-        all_success.extend(r.get())
+        success, failed = r.get()
+        all_success.extend(success)
+        all_failed.extend(failed)
 
+    # 写成功日志
     with open(log_path, 'a') as f:
         for name in all_success:
             f.write(name + '\n')
 
-    print(f"完成! 成功: {len(all_success)}/{pending_count}")
+    # 写失败日志
+    if all_failed:
+        error_log_path = log_path.replace('.processed.log', '.errors.log')
+        with open(error_log_path, 'a') as f:
+            for name, err in all_failed:
+                f.write(f"{name}\t{err}\n")
+        print(f"错误日志: {error_log_path}")
+
+    print(f"完成! 成功: {len(all_success)}/{pending_count}, 失败: {len(all_failed)}")
 
 
 def process_single(args):
@@ -246,11 +262,10 @@ def process_single(args):
         return_seconds=False,
     )
 
-    if not tss:
-        print("No speech detected, output file will not be created.")
-        return
-
-    concatenated = concat_speech_segments(audio, tss)
+    if tss:
+        concatenated = concat_speech_segments(audio, tss)
+    else:
+        concatenated = np.array([], dtype=np.float32)
 
     total_audio_sec = len(audio) / sr
     kept_audio_sec = len(concatenated) / sr
