@@ -58,8 +58,81 @@ def _validate_sr(sr: int):
 def concat_speech_segments(audio: np.ndarray, tss: List[dict]) -> np.ndarray:
     if not tss:
         return np.array([], dtype=np.float32)
-    segments = [audio[seg['start']:seg['end']] for seg in tss]
+    segments = [audio[seg['start'] : seg['end']] for seg in tss]
     return np.concatenate(segments)
+
+
+def _split_long_segment(seg: np.ndarray, max_samples: int) -> List[np.ndarray]:
+    """单个段过长时再拆分"""
+    if len(seg) <= max_samples:
+        return [seg]
+    return [seg[i : i + max_samples] for i in range(0, len(seg), max_samples)]
+
+
+def _chunk_by_timestamps(audio: np.ndarray, tss: List[dict], sr: int, max_hours: float) -> List[np.ndarray]:
+    """按时间戳聚合，累计长度超出限制则换新段"""
+    if not tss:
+        return []
+    max_samples = int(max_hours * 3600 * sr) if max_hours > 0 else len(audio)
+    if max_samples <= 0:
+        max_samples = len(audio)
+
+    chunks: List[np.ndarray] = []
+    cur_segments: List[np.ndarray] = []
+    cur_len = 0
+
+    for ts in tss:
+        seg = audio[ts["start"] : ts["end"]]
+        seg_len = len(seg)
+
+        # 如果单个段就超过 max，先把它切小块再处理
+        if seg_len > max_samples:
+            # 按照 max_samples or len(seg) 拆分
+            split_parts = _split_long_segment(seg, max_samples)
+            for part in split_parts:
+                if cur_segments and cur_len + len(part) > max_samples:
+                    chunks.append(np.concatenate(cur_segments))
+                    cur_segments = []
+                    cur_len = 0
+                cur_segments.append(part)
+                cur_len += len(part)
+            continue
+
+        if cur_segments and cur_len + seg_len > max_samples:
+            chunks.append(np.concatenate(cur_segments))
+            cur_segments = []
+            cur_len = 0
+
+        cur_segments.append(seg)
+        cur_len += seg_len
+
+    if cur_segments:
+        chunks.append(np.concatenate(cur_segments))
+
+    return chunks
+
+
+def _write_output_segments(out_path: str, segments: List[np.ndarray], sr: int) -> List[str]:
+    """写出多个段，1 段用原名，多段带 _partNNN"""
+    os.makedirs(Path(out_path).parent, exist_ok=True)
+
+    base = str(Path(out_path).with_suffix(""))
+    ext = Path(out_path).suffix or ".wav"
+
+    written_paths = []
+    if not segments:
+        return written_paths
+
+    if len(segments) == 1:
+        sf.write(out_path, segments[0], sr, subtype="PCM_16")
+        return [out_path]
+
+    for idx, seg in enumerate(segments):
+        part_path = f"{base}_part{idx:03d}{ext}"
+        sf.write(part_path, seg, sr, subtype="PCM_16")
+        written_paths.append(part_path)
+
+    return written_paths
 
 
 def _worker_batch(args_tuple) -> tuple:
@@ -97,12 +170,20 @@ def _worker_batch(args_tuple) -> tuple:
                 return_seconds=False,
             )
 
-            if tss:
-                concatenated = concat_speech_segments(audio, tss)
-            else:
-                concatenated = np.array([], dtype=np.float32)
-
-            sf.write(out_path, concatenated, sr, subtype="PCM_16")
+            has_speech = bool(tss)
+            if has_speech:
+                segments = _chunk_by_timestamps(audio, tss, sr, params['max_output_hours'])
+                written = _write_output_segments(out_path, segments, sr)
+                # 无写出也算失败
+                if not written:
+                    has_speech = False
+            if not has_speech:
+                # 无语音则删除已存在的输出文件（覆盖模式会删除原文件）
+                try:
+                    if os.path.exists(out_path):
+                        os.remove(out_path)
+                except Exception:
+                    pass
             success_files.append(filename)
         except Exception as e:
             failed_files.append((filename, str(e)[:100]))  # 截断错误信息
@@ -140,7 +221,7 @@ def load_processed_log(log_path: str) -> set:
 def split_list(lst: list, n: int) -> List[list]:
     """将列表均匀分成 n 份"""
     k, m = divmod(len(lst), n)
-    return [lst[i * k + min(i, m):(i + 1) * k + min(i + 1, m)] for i in range(n)]
+    return [lst[i * k + min(i, m) : (i + 1) * k + min(i + 1, m)] for i in range(n)]
 
 
 def process_directory(args):
@@ -178,6 +259,7 @@ def process_directory(args):
         'max_speech_s': args.max_speech_s,
         'min_silence_at_max_speech': args.min_silence_at_max_speech,
         'pad_ms': args.pad_ms,
+        'max_output_hours': args.max_output_hours,
     }
 
     # 分片
@@ -189,7 +271,7 @@ def process_directory(args):
 
     # 启动进程池，用 initializer 传递共享对象
     pool = mp.Pool(num_workers, initializer=_init_worker, initargs=(counter, lock))
-    
+
     # 提交任务
     async_results = [pool.apply_async(_worker_batch, ((chunk, params),)) for chunk in chunks]
     pool.close()
@@ -262,32 +344,42 @@ def process_single(args):
         return_seconds=False,
     )
 
-    if tss:
-        concatenated = concat_speech_segments(audio, tss)
-    else:
-        concatenated = np.array([], dtype=np.float32)
+    has_speech = bool(tss)
+    if has_speech:
+        segments = _chunk_by_timestamps(audio, tss, sr, args.max_output_hours)
+        if segments:
+            total_audio_sec = len(audio) / sr
+            kept_audio_sec = sum(len(seg) for seg in segments) / sr
+            removed_sec = total_audio_sec - kept_audio_sec
+            kept_ratio = (kept_audio_sec / total_audio_sec * 100.0) if total_audio_sec > 0 else 0.0
 
-    total_audio_sec = len(audio) / sr
-    kept_audio_sec = len(concatenated) / sr
-    removed_sec = total_audio_sec - kept_audio_sec
-    kept_ratio = (kept_audio_sec / total_audio_sec * 100.0) if total_audio_sec > 0 else 0.0
+            print(f"Original: {total_audio_sec:.2f}s")
+            print(f"After removing silence: {kept_audio_sec:.2f}s ({kept_ratio:.1f}%)")
+            print(f"Removed: {removed_sec:.2f}s of silence")
+            print(f"Detected {len(tss)} speech segments")
 
-    print(f"Original: {total_audio_sec:.2f}s")
-    print(f"After removing silence: {kept_audio_sec:.2f}s ({kept_ratio:.1f}%)")
-    print(f"Removed: {removed_sec:.2f}s of silence")
-    print(f"Detected {len(tss)} speech segments")
+            written = _write_output_segments(output_path, segments, sr)
+            if args.overwrite and len(written) == 1:
+                print(f"Overwritten: {written[0]}")
+            else:
+                print("Saved:")
+                for p in written:
+                    print(f"  {p}")
+        else:
+            has_speech = False
 
-    sf.write(output_path, concatenated, sr, subtype="PCM_16")
-    if args.overwrite:
-        print(f"Overwritten: {output_path}")
-    else:
-        print(f"Saved: {output_path}")
+    if not has_speech:
+        # 无语音则删除输出（覆盖模式删除原文件）
+        try:
+            if os.path.exists(output_path):
+                os.remove(output_path)
+            print("No speech detected, output removed.")
+        except Exception as e:
+            print(f"No speech detected, failed to remove output: {e}")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Remove silence and concatenate speech segments using Silero VAD"
-    )
+    parser = argparse.ArgumentParser(description="Remove silence and concatenate speech segments using Silero VAD")
     parser.add_argument("input", help="Path to input audio file or directory")
     parser.add_argument("-o", "--output", default=None, help="Output file path (single file mode only)")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite the original input file(s)")
@@ -296,10 +388,13 @@ def main():
     parser.add_argument("--min_speech_ms", type=int, default=250, help="Minimum speech duration in ms")
     parser.add_argument("--min_silence_ms", type=int, default=1000, help="Minimum silence duration in ms")
     parser.add_argument("--max_speech_s", type=float, default=10000, help="Maximum speech duration in seconds")
-    parser.add_argument("--min_silence_at_max_speech", type=float, default=98, help="Minimum silence (ms) at max speech")
+    parser.add_argument(
+        "--min_silence_at_max_speech", type=float, default=98, help="Minimum silence (ms) at max speech"
+    )
     parser.add_argument("--pad_ms", type=int, default=30, help="Padding around each speech segment in ms")
     parser.add_argument("--visualize", action="store_true", help="Visualize probability curve (single file mode)")
     parser.add_argument("-r", "--recursive", action="store_true", help="Recursively search subdirectories")
+    parser.add_argument("--max_output_hours", type=float, default=3.0, help="Maximum duration per output file in hours")
     args = parser.parse_args()
 
     if os.path.isdir(args.input):
