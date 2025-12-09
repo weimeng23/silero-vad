@@ -190,6 +190,14 @@ def _worker_batch(args_tuple) -> tuple:
                     has_speech = False
                 else:
                     success_files.append(filename)
+                # 若分段多于1且是覆盖模式，删除原文件
+                if params['overwrite'] and len(written) > 1:
+                    try:
+                        if os.path.exists(out_path):
+                            os.remove(out_path)
+                            removed_files.append(filename)
+                    except Exception:
+                        pass
             if not has_speech:
                 # 无语音则删除已存在的输出文件（覆盖模式会删除原文件）
                 try:
@@ -387,6 +395,15 @@ def process_single(args):
                 print("Saved:")
                 for p in written:
                     print(f"  {p}")
+
+            # 若分段多于1且覆盖模式，删除原文件
+            if args.overwrite and len(written) > 1:
+                try:
+                    if os.path.exists(output_path):
+                        os.remove(output_path)
+                        print(f"Original removed (multi-part): {output_path}")
+                except Exception as e:
+                    print(f"Failed to remove original: {e}")
         else:
             has_speech = False
 
