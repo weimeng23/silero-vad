@@ -136,13 +136,24 @@ def _write_output_segments(out_path: str, segments: List[np.ndarray], sr: int) -
 
 
 def _worker_batch(args_tuple) -> tuple:
-    """子进程：处理一批文件，返回 (成功文件名列表, 失败文件及原因列表)"""
+    """子进程：处理一批文件，返回 (成功文件名列表, 失败文件及原因列表, 删除文件列表)"""
     file_list, params = args_tuple
     global _shared_counter, _shared_lock
 
-    model = NumpyOnnxWrapper(_locate_onnx_path(), force_onnx_cpu=True)
+    # 模型初始化失败时，整批标记失败并推进进度，避免主进程卡死
+    try:
+        model = NumpyOnnxWrapper(_locate_onnx_path(), force_onnx_cpu=True)
+    except Exception as e:
+        failed_files = []
+        with _shared_lock:
+            for fp in file_list:
+                failed_files.append((os.path.basename(fp), f"model_init: {str(e)[:100]}"))
+                _shared_counter.value += 1
+        return [], failed_files, []
+
     success_files = []
     failed_files = []  # [(filename, error_msg), ...]
+    removed_files = []
 
     for filepath in file_list:
         filename = os.path.basename(filepath)
@@ -177,14 +188,16 @@ def _worker_batch(args_tuple) -> tuple:
                 # 无写出也算失败
                 if not written:
                     has_speech = False
+                else:
+                    success_files.append(filename)
             if not has_speech:
                 # 无语音则删除已存在的输出文件（覆盖模式会删除原文件）
                 try:
                     if os.path.exists(out_path):
                         os.remove(out_path)
+                        removed_files.append(filename)
                 except Exception:
                     pass
-            success_files.append(filename)
         except Exception as e:
             failed_files.append((filename, str(e)[:100]))  # 截断错误信息
 
@@ -192,7 +205,7 @@ def _worker_batch(args_tuple) -> tuple:
         with _shared_lock:
             _shared_counter.value += 1
 
-    return success_files, failed_files
+    return success_files, failed_files, removed_files
 
 
 def get_audio_files(directory: str, recursive: bool = False) -> List[str]:
@@ -291,10 +304,12 @@ def process_directory(args):
     # 收集结果
     all_success = []
     all_failed = []
+    all_removed = []
     for r in async_results:
-        success, failed = r.get()
+        success, failed, removed = r.get()
         all_success.extend(success)
         all_failed.extend(failed)
+        all_removed.extend(removed)
 
     # 写成功日志
     with open(log_path, 'a') as f:
@@ -309,7 +324,14 @@ def process_directory(args):
                 f.write(f"{name}\t{err}\n")
         print(f"错误日志: {error_log_path}")
 
-    print(f"完成! 成功: {len(all_success)}/{pending_count}, 失败: {len(all_failed)}")
+    if all_removed:
+        removed_log_path = log_path.replace('.processed.log', '.removed.log')
+        with open(removed_log_path, 'a') as f:
+            for name in all_removed:
+                f.write(f"{name}\n")
+        print(f"移除日志: {removed_log_path}")
+
+    print(f"完成! 成功: {len(all_success)}/{pending_count}, 失败: {len(all_failed)}, 移除: {len(all_removed)}")
 
 
 def process_single(args):
@@ -379,7 +401,14 @@ def process_single(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Remove silence and concatenate speech segments using Silero VAD")
+    # 避免 fork 下第三方库卡死，强制使用 spawn
+    if mp.get_start_method(allow_none=True) != "spawn":
+        mp.set_start_method("spawn", force=True)
+
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        description="Remove silence and concatenate speech segments using Silero VAD",
+    )
     parser.add_argument("input", help="Path to input audio file or directory")
     parser.add_argument("-o", "--output", default=None, help="Output file path (single file mode only)")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite the original input file(s)")
