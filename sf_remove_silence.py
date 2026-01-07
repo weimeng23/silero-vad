@@ -432,15 +432,15 @@ def main():
     parser.add_argument("-j", "--workers", type=int, default=8, help="Number of parallel workers (directory mode)")
     parser.add_argument("--threshold", type=float, default=0.5, help="Speech threshold")
     parser.add_argument("--min_speech_ms", type=int, default=250, help="Minimum speech duration in ms")
-    parser.add_argument("--min_silence_ms", type=int, default=1000, help="Minimum silence duration in ms")
-    parser.add_argument("--max_speech_s", type=float, default=10000, help="Maximum speech duration in seconds")
+    parser.add_argument("--min_silence_ms", type=int, default=2000, help="Minimum silence duration in ms")
+    parser.add_argument("--max_speech_s", type=float, default=3600, help="Maximum speech duration in seconds")
     parser.add_argument(
         "--min_silence_at_max_speech", type=float, default=98, help="Minimum silence (ms) at max speech"
     )
     parser.add_argument("--pad_ms", type=int, default=30, help="Padding around each speech segment in ms")
     parser.add_argument("--visualize", action="store_true", help="Visualize probability curve (single file mode)")
     parser.add_argument("-r", "--recursive", action="store_true", help="Recursively search subdirectories")
-    parser.add_argument("--max_output_hours", type=float, default=2.0, help="Maximum duration per output file in hours")
+    parser.add_argument("--max_output_hours", type=float, default=1.0, help="Maximum duration per output file in hours")
     args = parser.parse_args()
 
     if os.path.isdir(args.input):
