@@ -6,6 +6,10 @@
 # Last Modified By  : Meng Wei <wmeng94@gmail.com>
 
 input_dir=$1
+if [[ -z "$input_dir" ]]; then
+    echo "Usage: $0 <input_directory>"
+    exit 1
+fi
 
 
 python sf_remove_silence.py $input_dir -j 20 --overwrite -r
