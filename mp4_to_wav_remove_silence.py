@@ -273,8 +273,21 @@ def split_list(lst: list, n: int) -> List[list]:
     return [lst[i * k + min(i, m): (i + 1) * k + min(i + 1, m)] for i in range(n)]
 
 
+def _fmt_duration(seconds: float) -> str:
+    """格式化耗时：>1h 显示 HH:MM:SS，>1min 显示 MM:SS，否则显示秒"""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    if seconds < 3600:
+        m, s = divmod(int(seconds), 60)
+        return f"{m}m{s:02d}s"
+    h, rem = divmod(int(seconds), 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}h{m:02d}m{s:02d}s"
+
+
 def process_directory(args):
     """多进程批量处理目录"""
+    start_time = time.time()
     input_dir = args.input
     out_dir = args.out_dir
     os.makedirs(out_dir, exist_ok=True)
@@ -330,7 +343,14 @@ def process_directory(args):
     while True:
         with lock:
             current = counter.value
-        print(f"\r进度: {current}/{pending_count}", end="", flush=True)
+        elapsed = time.time() - start_time
+        if current > 0:
+            avg = elapsed / current
+            eta = avg * (pending_count - current)
+            print(f"\r进度: {current}/{pending_count} | 已用 {_fmt_duration(elapsed)} | 预计剩余 {_fmt_duration(eta)}",
+                  end="", flush=True)
+        else:
+            print(f"\r进度: {current}/{pending_count} | 已用 {_fmt_duration(elapsed)}", end="", flush=True)
         if current >= pending_count:
             break
         time.sleep(1.0)
@@ -371,11 +391,15 @@ def process_directory(args):
                 f.write(name + '\n')
         print(f"跳过日志(无语音): {skipped_log_path}")
 
+    total_elapsed = time.time() - start_time
+    avg_per_file = total_elapsed / pending_count if pending_count else 0.0
     print(f"完成! 成功: {len(all_success)} | 跳过(无语音): {len(all_skipped)} | 失败: {len(all_failed)} / 总待处理: {pending_count}")
+    print(f"总耗时: {_fmt_duration(total_elapsed)} | 平均: {avg_per_file:.2f}s/文件 | 进程数: {num_workers}")
 
 
 def process_single(args):
     """处理单个文件"""
+    start_time = time.time()
     if args.output:
         out_path = args.output
     elif args.out_dir:
@@ -435,6 +459,9 @@ def process_single(args):
     written = _write_output_segments(out_path, segments, sr)
     for p in written:
         print(f"已保存: {p}")
+
+    total_elapsed = time.time() - start_time
+    print(f"总耗时: {_fmt_duration(total_elapsed)}")
 
 
 def main():
